@@ -90,6 +90,9 @@ static void setupEspNow() {
     Serial.println("ESP-NOW init FAILED - serial events only");
     return;
   }
+  // The bridge only ever transmits; let the WiFi RX chain sleep. The
+  // radio wakes to send, which costs ~a millisecond we don't feel.
+  esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, BROADCAST, 6);
   peer.channel = 0;  // 0 = whatever the radio is on (pinned above)
@@ -101,6 +104,16 @@ static void setupEspNow() {
   }
   espnowUp = true;
   Serial.printf("ESP-NOW up on channel %d (broadcast)\n", ESPNOW_CHANNEL);
+}
+
+static int connectedCount() {
+  int n = 0;
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i] != nullptr) {
+      n++;
+    }
+  }
+  return n;
 }
 
 static void diffBits(int slot, const char* kind, uint16_t prev, uint16_t now,
@@ -130,6 +143,11 @@ static void onConnected(ControllerPtr ctl) {
       ControllerProperties p = ctl->getProperties();
       Serial.printf("CONNECTED slot=%d model='%s' vid=0x%04x pid=0x%04x\n",
                     i, ctl->getModelName().c_str(), p.vendor_id, p.product_id);
+      // Pad's aboard: stop the continuous inquiry/page scanning. This is
+      // the bridge's biggest radio (and heat) saving, and stops anyone
+      // else pairing mid-game.
+      BP32.enableNewBluetoothConnections(false);
+      Serial.println("scanning off (reopens on disconnect)");
       return;
     }
   }
@@ -141,6 +159,10 @@ static void onDisconnected(ControllerPtr ctl) {
     if (controllers[i] == ctl) {
       controllers[i] = nullptr;
       Serial.printf("DISCONNECTED slot=%d\n", i);
+      if (connectedCount() == 0) {
+        BP32.enableNewBluetoothConnections(true);
+        Serial.println("scanning on");
+      }
       return;
     }
   }
@@ -164,16 +186,20 @@ static void processController(int slot, ControllerPtr ctl) {
 }
 
 void setup() {
+  // Button parsing doesn't need 240MHz; 80 is the radio minimum and
+  // runs markedly cooler on a powerbank.
+  setCpuFrequencyMhz(80);
   Serial.begin(115200);
-  Serial.printf("jacket-pad-bridge v2, Bluepad32 fw %s\n",
-                BP32.firmwareVersion());
+  Serial.printf("jacket-pad-bridge v3, Bluepad32 fw %s, cpu %dMHz\n",
+                BP32.firmwareVersion(), getCpuFrequencyMhz());
   setupEspNow();
   BP32.setup(&onConnected, &onDisconnected);
-  // Bring-up convenience: drop stale bonds every boot so a blinking pad
-  // always gets accepted. v2 should keep bonds instead.
-  BP32.forgetBluetoothKeys();
+  // Bonds are kept across reboots: pair the pad once (hold its pair
+  // button), and from then on it just reconnects. To force a fresh
+  // pairing, temporarily uncomment:
+  // BP32.forgetBluetoothKeys();
   BP32.enableVirtualDevice(false);
-  Serial.println("READY - put the pad in pairing mode");
+  Serial.println("READY - bonded pads reconnect; new pads: pairing mode");
 }
 
 void loop() {

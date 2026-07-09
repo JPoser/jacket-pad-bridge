@@ -15,14 +15,21 @@ hold the pair button to bond).
 
 ## Status
 
-- **v1 (this)**: controller → bridge link working; events printed to
-  USB serial as `EVT slot=0 btn a down` lines. `emit()` in
-  `bridge/bridge.ino` is the seam for the badge transport.
-- **v2 (planned)**: forward events to the badge. Preferred: ESP-NOW
-  (WiFi, coexists with Classic BT, no pairing, and the badge side can
-  reuse the games' existing Bluefruit packet parser). Fallbacks: UART
-  into a spare hexpansion slot, or a BTstack BLE central writing to the
-  games' Nordic UART service.
+Working end to end: controller events are broadcast over **ESP-NOW**
+(channel 1) as 5-byte Bluefruit control-pad packets — the exact bytes
+the games' phone path parses — and received on the badge by their
+`padlink.py`. Mapping: D-pad → `'5'`-`'8'`, face buttons → `'2'`-`'4'`
+(fire in JacVaders), start/select → `'1'` (restart). Events also print
+to USB serial for debugging.
+
+Power/heat (v3): CPU pinned to 80MHz, WiFi modem sleep on (the bridge
+only transmits), and Bluetooth scanning stops while a controller is
+connected — reopens on disconnect. Bonds persist across reboots: pair
+a pad once with its pair button, thereafter it reconnects on power-up.
+
+Powerbank note: the savings can drop idle draw near the auto-shutoff
+threshold of some powerbanks. If yours powers off after a few minutes,
+use one with a trickle/low-current mode.
 
 ## Build & flash
 
