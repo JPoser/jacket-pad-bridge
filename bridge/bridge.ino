@@ -1,21 +1,33 @@
 /*
- * jacket-pad-bridge v1 — Bluepad32 controller receiver.
+ * jacket-pad-bridge v2 — Bluepad32 controller receiver + ESP-NOW link.
  *
  * An original dual-mode ESP32 (Classic + BLE) running Bluepad32 as a
  * Bluetooth HID host: it pairs with controllers the Tildagon badge's
  * BLE-only ESP32-S3 can't hear — 8BitDo pads (D mode), DualShock,
  * Switch Pro, and friends.
  *
- * v1 proves the controller link: every connection and button/D-pad
- * change is printed to USB serial. emit() is the seam where v2 will
- * forward events to the badge (UART into a hexpansion slot, or BLE
- * NUS speaking the games' Bluefruit packet protocol).
+ * Every button/D-pad edge is broadcast over ESP-NOW as a 5-byte
+ * Bluefruit control-pad packet ('!' 'B' <button '1'-'8'> <'1'/'0'>
+ * <crc>) — the same bytes the jacket games' BLE phone path already
+ * parses, so the badge side reuses that parser verbatim. Events also
+ * print to USB serial for debugging.
+ *
+ * Channel note: ESP-NOW needs both ends on the same WiFi channel. The
+ * bridge pins ESPNOW_CHANNEL below; a badge with WiFi idle sits on
+ * channel 1. If the badge ever joins an AP, match its channel here.
  *
  * Board: "ESP32 Dev Module" from the esp32-bluepad32 core
  * (FQBN esp32-bluepad32:esp32:esp32).
  */
 
 #include <Bluepad32.h>
+#include <WiFi.h>
+#include <esp_now.h>
+#include <esp_wifi.h>
+
+static const int ESPNOW_CHANNEL = 1;
+static const uint8_t BROADCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+static bool espnowUp = false;
 
 static ControllerPtr controllers[BP32_MAX_GAMEPADS];
 
@@ -24,11 +36,71 @@ static uint8_t lastDpad[BP32_MAX_GAMEPADS];
 static uint16_t lastButtons[BP32_MAX_GAMEPADS];
 static uint16_t lastMisc[BP32_MAX_GAMEPADS];
 
-// v2 will turn this into a real transport (UART/BLE). One event per
-// press/release edge: kind is "dpad", "btn" or "misc"; bit names the
-// control; down is the new state.
+// Controls → Bluefruit control-pad button characters, matching what the
+// games' _on_ble_press handlers expect: D-pad '5'-'8' (up/down/left/
+// right), '1' restart (start/select), '2'-'4' the face buttons (all
+// read as "fire" in JacVaders; ignored by JacMan).
+static char mapToBluefruit(const char* kind, const char* bit) {
+  if (strcmp(kind, "dpad") == 0) {
+    if (strcmp(bit, "up") == 0) return '5';
+    if (strcmp(bit, "down") == 0) return '6';
+    if (strcmp(bit, "left") == 0) return '7';
+    if (strcmp(bit, "right") == 0) return '8';
+  } else if (strcmp(kind, "btn") == 0) {
+    if (strcmp(bit, "a") == 0) return '2';
+    if (strcmp(bit, "b") == 0) return '3';
+    if (strcmp(bit, "x") == 0) return '4';
+    if (strcmp(bit, "y") == 0) return '2';
+  } else if (strcmp(kind, "misc") == 0) {
+    if (strcmp(bit, "start") == 0 || strcmp(bit, "select") == 0) return '1';
+  }
+  return 0;
+}
+
+static void sendBluefruit(char button, bool down) {
+  if (!espnowUp) {
+    return;
+  }
+  uint8_t pkt[5];
+  pkt[0] = '!';
+  pkt[1] = 'B';
+  pkt[2] = (uint8_t)button;
+  pkt[3] = down ? '1' : '0';
+  pkt[4] = (uint8_t)~(pkt[0] + pkt[1] + pkt[2] + pkt[3]);
+  esp_err_t err = esp_now_send(BROADCAST, pkt, sizeof(pkt));
+  if (err != ESP_OK) {
+    Serial.printf("espnow send failed: %d\n", err);
+  }
+}
+
+// One event per press/release edge: kind is "dpad", "btn" or "misc";
+// bit names the control; down is the new state.
 static void emit(int slot, const char* kind, const char* bit, bool down) {
   Serial.printf("EVT slot=%d %s %s %s\n", slot, kind, bit, down ? "down" : "up");
+  char button = mapToBluefruit(kind, bit);
+  if (button) {
+    sendBluefruit(button, down);
+  }
+}
+
+static void setupEspNow() {
+  WiFi.mode(WIFI_STA);
+  esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE);
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init FAILED - serial events only");
+    return;
+  }
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, BROADCAST, 6);
+  peer.channel = 0;  // 0 = whatever the radio is on (pinned above)
+  peer.ifidx = WIFI_IF_STA;
+  peer.encrypt = false;
+  if (esp_now_add_peer(&peer) != ESP_OK) {
+    Serial.println("ESP-NOW add_peer FAILED - serial events only");
+    return;
+  }
+  espnowUp = true;
+  Serial.printf("ESP-NOW up on channel %d (broadcast)\n", ESPNOW_CHANNEL);
 }
 
 static void diffBits(int slot, const char* kind, uint16_t prev, uint16_t now,
@@ -93,8 +165,9 @@ static void processController(int slot, ControllerPtr ctl) {
 
 void setup() {
   Serial.begin(115200);
-  Serial.printf("jacket-pad-bridge v1, Bluepad32 fw %s\n",
+  Serial.printf("jacket-pad-bridge v2, Bluepad32 fw %s\n",
                 BP32.firmwareVersion());
+  setupEspNow();
   BP32.setup(&onConnected, &onDisconnected);
   // Bring-up convenience: drop stale bonds every boot so a blinking pad
   // always gets accepted. v2 should keep bonds instead.
