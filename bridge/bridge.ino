@@ -27,7 +27,15 @@
 
 static const int ESPNOW_CHANNEL = 1;
 static const uint8_t BROADCAST[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+// The badge's STA MAC. Unicast frames get link-layer ACKs and ~7
+// automatic retries — broadcasts have neither, and the badge's radio
+// time-slices with BLE, silently eating unacknowledged frames. Set to
+// your badge (mpremote: network.WLAN(STA_IF).config('mac')); zeroed =
+// fall back to broadcast.
+static const uint8_t BADGE_MAC[6] = {0x64, 0xe8, 0x33, 0x72, 0x12, 0x74};
 static bool espnowUp = false;
+static bool unicast = false;
+static uint32_t sendFails = 0;
 
 static ControllerPtr controllers[BP32_MAX_GAMEPADS];
 
@@ -67,9 +75,20 @@ static void sendBluefruit(char button, bool down) {
   pkt[2] = (uint8_t)button;
   pkt[3] = down ? '1' : '0';
   pkt[4] = (uint8_t)~(pkt[0] + pkt[1] + pkt[2] + pkt[3]);
-  esp_err_t err = esp_now_send(BROADCAST, pkt, sizeof(pkt));
+  esp_err_t err = esp_now_send(unicast ? BADGE_MAC : BROADCAST,
+                               pkt, sizeof(pkt));
   if (err != ESP_OK) {
     Serial.printf("espnow send failed: %d\n", err);
+  }
+}
+
+// Delivery report per unicast frame (broadcasts always claim success).
+static void onSent(const uint8_t* mac, esp_now_send_status_t status) {
+  if (status != ESP_NOW_SEND_SUCCESS) {
+    sendFails++;
+    Serial.printf("espnow DELIVERY FAILED (%lu total) - is the badge "
+                  "listening on channel %d?\n",
+                  (unsigned long)sendFails, ESPNOW_CHANNEL);
   }
 }
 
@@ -93,6 +112,7 @@ static void setupEspNow() {
   // The bridge only ever transmits; let the WiFi RX chain sleep. The
   // radio wakes to send, which costs ~a millisecond we don't feel.
   esp_wifi_set_ps(WIFI_PS_MIN_MODEM);
+  esp_now_register_send_cb(&onSent);
   esp_now_peer_info_t peer = {};
   memcpy(peer.peer_addr, BROADCAST, 6);
   peer.channel = 0;  // 0 = whatever the radio is on (pinned above)
@@ -102,8 +122,24 @@ static void setupEspNow() {
     Serial.println("ESP-NOW add_peer FAILED - serial events only");
     return;
   }
+  // Prefer unicast to the badge when a MAC is configured.
+  bool haveMac = false;
+  for (int i = 0; i < 6; i++) {
+    if (BADGE_MAC[i]) {
+      haveMac = true;
+    }
+  }
+  if (haveMac) {
+    esp_now_peer_info_t badge = {};
+    memcpy(badge.peer_addr, BADGE_MAC, 6);
+    badge.channel = 0;
+    badge.ifidx = WIFI_IF_STA;
+    badge.encrypt = false;
+    unicast = (esp_now_add_peer(&badge) == ESP_OK);
+  }
   espnowUp = true;
-  Serial.printf("ESP-NOW up on channel %d (broadcast)\n", ESPNOW_CHANNEL);
+  Serial.printf("ESP-NOW up on channel %d (%s)\n", ESPNOW_CHANNEL,
+                unicast ? "unicast to badge" : "broadcast");
 }
 
 static int connectedCount() {
