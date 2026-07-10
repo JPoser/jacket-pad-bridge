@@ -204,13 +204,37 @@ static void onDisconnected(ControllerPtr ctl) {
   }
 }
 
+// Many pads in D-input mode (the 8BitDo Micro included) report the
+// D-pad as the left-stick axes rather than the HID hat that dpad()
+// reads. Synthesize dpad bits from axis extremes so both styles work.
+// Bluepad32 axes run -512..511; half-deflection is a solid press.
+static uint8_t axisDpad(ControllerPtr ctl) {
+  const int T = 256;
+  uint8_t d = 0;
+  if (ctl->axisY() < -T) d |= DPAD_UP;
+  if (ctl->axisY() > T) d |= DPAD_DOWN;
+  if (ctl->axisX() > T) d |= DPAD_RIGHT;
+  if (ctl->axisX() < -T) d |= DPAD_LEFT;
+  return d;
+}
+
 static void processController(int slot, ControllerPtr ctl) {
   if (!ctl->isGamepad()) {
     return;
   }
-  uint8_t dpad = ctl->dpad();
+  uint8_t dpad = ctl->dpad() | axisDpad(ctl);
   uint16_t buttons = ctl->buttons();
   uint16_t misc = ctl->miscButtons();
+
+  // Bring-up visibility: raw state whenever something is held, max 2/s.
+  static uint32_t lastDump = 0;
+  if ((dpad || buttons || misc) && millis() - lastDump > 500) {
+    lastDump = millis();
+    Serial.printf("RAW dpad=0x%02x hat=0x%02x ax=%4d ay=%4d "
+                  "btn=0x%04x misc=0x%02x\n",
+                  dpad, ctl->dpad(), ctl->axisX(), ctl->axisY(),
+                  buttons, misc);
+  }
 
   diffBits(slot, "dpad", lastDpad[slot], dpad, DPAD_NAMES, 4);
   diffBits(slot, "btn", lastButtons[slot], buttons, BUTTON_NAMES, 10);
