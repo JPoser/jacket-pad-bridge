@@ -226,6 +226,37 @@ static uint8_t axisDpad(ControllerPtr ctl) {
   return d;
 }
 
+// Hold-to-repeat for the D-pad. The games act on press edges, so a
+// held direction moves the cannon exactly once - crossing the field
+// takes five deliberate taps, which players read as "slow". Repeat
+// the held direction like a keyboard: first after REPEAT_DELAY_MS,
+// then every REPEAT_MS. Fire buttons deliberately do not repeat.
+static const uint32_t REPEAT_DELAY_MS = 220;
+static const uint32_t REPEAT_MS = 130;
+static uint32_t dpadRepeatAt[BP32_MAX_GAMEPADS];
+
+static void repeatHeldDpad() {
+  uint32_t now = millis();
+  for (int i = 0; i < BP32_MAX_GAMEPADS; i++) {
+    if (controllers[i] == nullptr || !controllers[i]->isConnected()) {
+      continue;
+    }
+    uint8_t held = lastDpad[i];
+    if (!held || (int32_t)(now - dpadRepeatAt[i]) < 0) {
+      continue;
+    }
+    dpadRepeatAt[i] = now + REPEAT_MS;
+    for (int b = 0; b < 4; b++) {
+      if (held & (1 << b)) {
+        char button = mapToBluefruit("dpad", DPAD_NAMES[b]);
+        if (button) {
+          sendBluefruit(button, true);  // parser is press-only: this is a move
+        }
+      }
+    }
+  }
+}
+
 static void processController(int slot, ControllerPtr ctl) {
   if (!ctl->isGamepad()) {
     return;
@@ -248,6 +279,11 @@ static void processController(int slot, ControllerPtr ctl) {
   diffBits(slot, "btn", lastButtons[slot], buttons, BUTTON_NAMES, 10);
   diffBits(slot, "misc", lastMisc[slot], misc, MISC_NAMES, 4);
 
+  if (dpad && dpad != lastDpad[slot]) {
+    // Fresh direction: the edge just sent counts as the first move;
+    // repeats start after the initial delay.
+    dpadRepeatAt[slot] = millis() + REPEAT_DELAY_MS;
+  }
   lastDpad[slot] = dpad;
   lastButtons[slot] = buttons;
   lastMisc[slot] = misc;
@@ -279,6 +315,8 @@ void loop() {
       }
     }
   }
+
+  repeatHeldDpad();
 
   static uint32_t lastBeat = 0;
   if (millis() - lastBeat > 5000) {
