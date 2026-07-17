@@ -75,8 +75,14 @@ static void sendBluefruit(char button, bool down) {
   pkt[2] = (uint8_t)button;
   pkt[3] = down ? '1' : '0';
   pkt[4] = (uint8_t)~(pkt[0] + pkt[1] + pkt[2] + pkt[3]);
-  esp_err_t err = esp_now_send(unicast ? BADGE_MAC : BROADCAST,
-                               pkt, sizeof(pkt));
+  // v6 field lesson: unicast ACK-and-retry sounded safer, but this
+  // board's BT Classic link time-slices the one radio and clips the
+  // ACK window - roughly half the frames burned the full retry budget,
+  // the TX queue backed up, and inputs arrived seconds late (the badge
+  // often HAD the frame while we logged it as failed). Broadcast is
+  // fire-and-forget: with the badge receiver held awake by padlink's
+  // PM_NONE watchdog, a rarely lost press beats a reliably late one.
+  esp_err_t err = esp_now_send(BROADCAST, pkt, sizeof(pkt));
   if (err != ESP_OK) {
     Serial.printf("espnow send failed: %d\n", err);
   }
@@ -135,6 +141,8 @@ static void setupEspNow() {
     badge.channel = 0;
     badge.ifidx = WIFI_IF_STA;
     badge.encrypt = false;
+    // Peer kept registered for diagnostics, but sends are broadcast
+    // (see the v6 note in sendBluefruit).
     unicast = (esp_now_add_peer(&badge) == ESP_OK);
   }
   espnowUp = true;
